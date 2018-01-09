@@ -1,0 +1,5 @@
+*.pyc
+
+*.swp
+
+secret_keys.py
