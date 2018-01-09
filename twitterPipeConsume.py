@@ -1,6 +1,7 @@
 import json
 import pandas as pd
 import psycopg2
+import itertools
 
 from secret_keys import DB_USER
 from secret_keys import DB_NAME
@@ -29,7 +30,11 @@ def print_json_obj_aux(obj, complete_print, indent=0):
             print ' ' * indent, obj # key, 'is: ', value
 
 def addNewColumn(cur, table, column_name, column_type):
-    cur.execute("""ALTER TABLE IF EXISTS {0} ADD COLUMN {1} {2};""".format(table, column_name, column_type))
+    # Checking for existing columns
+    cur.execute("""SELECT column_name FROM information_schema.columns 
+                WHERE table_name='{}' and column_name='{}'""".format(table, column_name))
+    if not cur.rowcount:
+        cur.execute("""ALTER TABLE IF EXISTS {0} ADD COLUMN {1} {2}""".format(table, column_name, column_type))
 
 # https://www.postgresql.org/docs/9.5/static/datatype.html
 # https://pandas.pydata.org/pandas-docs/stable/basics.html#dtypes
@@ -57,7 +62,6 @@ tweets = []
 with open(RAW_DATA_PATH, "r") as raw_data_file:
     for line in raw_data_file:
         tweets.append(json.loads(line))
-raw_data_file.close()
 
 df = pd.DataFrame.from_dict(tweets)
 
@@ -70,13 +74,17 @@ try:
     TABLE = "tweets"
 
     cur.execute("DROP TABLE IF EXISTS tweets CASCADE")
-    cur.execute("CREATE TABLE IF NOT EXISTS tweets (id integer PRIMARY KEY);")
+    cur.execute("CREATE TABLE IF NOT EXISTS tweets ()")
 
     # Add columns to Database, if necessary
     for (column_name, column_type) in zip(list(df.columns.values.tolist()), df.dtypes):
         # print "{}\t---> {}".format(column_type, dtypeToPSQLType(str(column_type)))
         # Note: the prefix 'c_' is used to avoid conflicts with PSQL keywords, such as 'user'
         addNewColumn(cur, TABLE, 'c_' + str(column_name), dtypeToPSQLType(str(column_type)))
+
+    for row in df.itertuples():
+        for col, ind in zip(df.columns.values.tolist(), itertools.count()):
+            print col, row[ind]
 
     cur.close()
     conn.commit()
