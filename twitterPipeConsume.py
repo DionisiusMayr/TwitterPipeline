@@ -2,70 +2,78 @@ import json
 import pandas as pd
 import psycopg2
 import itertools
+import pyspark
 
+from pyspark.sql import SparkSession
+from pyspark.sql import SQLContext
+from pyspark.sql import DataFrameWriter
+from sqlalchemy import create_engine
 from secret_keys import DB_USER
 from secret_keys import DB_NAME
 from secret_keys import DB_PASSWORD
 
 RAW_DATA_PATH = 'data/data.txt'
-
-def print_json_obj(obj):
-    print_json_obj_aux(obj, True)
-
-def print_json_keys(obj):
-    print_json_obj_aux(obj, False)
-
-def print_json_obj_aux(obj, complete_print, indent=0):
-    if isinstance(obj, dict):
-        for key, value in obj.iteritems():
-            print ' ' * indent + str(key)
-            if complete_print:
-                print ':'
-            print_json_obj_aux(value, complete_print, indent + 2)
-    elif isinstance(obj, list):
-        for v in obj:
-            print_json_obj_aux(v, complete_print, indent + 2)
-    else:
-        if complete_print:
-            print ' ' * indent, obj # key, 'is: ', value
+PREFIX = 'c_'
 
 def addNewColumn(cur, table, column_name, column_type):
     # Checking for existing columns
-    cur.execute("""SELECT column_name FROM information_schema.columns 
+    cur.execute(u"""SELECT column_name FROM information_schema.columns 
                 WHERE table_name='{}' and column_name='{}'""".format(table, column_name))
     if not cur.rowcount:
-        cur.execute("""ALTER TABLE IF EXISTS {0} ADD COLUMN {1} {2}""".format(table, column_name, column_type))
+        cur.execute(u"""ALTER TABLE IF EXISTS {0} ADD COLUMN {1} {2}""".format(table, column_name, column_type))
 
 # https://www.postgresql.org/docs/9.5/static/datatype.html
 # https://pandas.pydata.org/pandas-docs/stable/basics.html#dtypes
 def dtypeToPSQLType(dtype):
     conversion_map = {
-            'int64':'int8',
-            'int32':'int4',
-            'float64':'float8',
-            'float32':'float4',
-            'bool':'bool',
-            'datetime64':'timestamp',
-            'datetime64ns':'timestamp', # TODO: how to store nano seconds in PSQL?
-            'datetime64tz':'time with time zone',
-            'timedelta':'interval',
-            'category':'varchar', # TODO: look up how to store a pandas category. varchar?
-            'object':'varchar'
+            'int64': 'int8',
+            'int32': 'int4',
+            'float64': 'float8',
+            'float32': 'float4',
+            'bool': 'bool',
+            'datetime64': 'timestamp',
+            'datetime64ns': 'timestamp', # TODO: how to store nano seconds in PSQL?
+            'datetime64tz': 'time with time zone',
+            'timedelta': 'interval',
+            'category': 'varchar', # TODO: look up how to store a pandas category. varchar?
+            'object': 'varchar'
             }
 
     return conversion_map[dtype]
 
+def shortenName(name):
+    abbreviations = {
+            'background': 'bg',
+            'coordinates': 'coord',
+            'entities': 'entt',
+            'extended': 'ext',
+            'follow': 'fllw',
+            'follower': 'fllwr',
+            'following': 'fllwng',
+            'image': 'img',
+            'profile': 'pfl',
+            'quoted': 'qotd',
+            'retweet': 'rtw',
+            'retweeted': 'rtwd',
+            'status': 'st',
+            'user': 'usr'
+            }
 
-raw_data_file = open(RAW_DATA_PATH, "r")
+    for (k, v) in abbreviations.iteritems():
+        name = name.replace(k, v)
 
-tweets = []
-with open(RAW_DATA_PATH, "r") as raw_data_file:
-    for line in raw_data_file:
-        tweets.append(json.loads(line))
+    return name
 
-df = pd.DataFrame.from_dict(tweets)
 
-# print df['entities'].dtypes
+spark = SparkSession \
+        .builder \
+        .config("spark.jars", "/home/dionisius/Downloads/postgresql-42.1.4.jar") \
+        .appName("Python Spark SQL basic example") \
+        .getOrCreate()
+df = spark.read.json(RAW_DATA_PATH)
+df = df.toPandas()
+# Treat duplicated rows
+df = df.drop_duplicates(subset='id')
 
 conn = None
 try:
@@ -73,18 +81,20 @@ try:
     cur = conn.cursor()
     TABLE = "tweets"
 
-    cur.execute("DROP TABLE IF EXISTS tweets CASCADE")
-    cur.execute("CREATE TABLE IF NOT EXISTS tweets ()")
+    cur.execute(u"DROP TABLE IF EXISTS tweets CASCADE")
+    cur.execute(u"CREATE TABLE IF NOT EXISTS tweets ()")
 
+    columns_list = []
     # Add columns to Database, if necessary
     for (column_name, column_type) in zip(list(df.columns.values.tolist()), df.dtypes):
-        # print "{}\t---> {}".format(column_type, dtypeToPSQLType(str(column_type)))
         # Note: the prefix 'c_' is used to avoid conflicts with PSQL keywords, such as 'user'
-        addNewColumn(cur, TABLE, 'c_' + str(column_name), dtypeToPSQLType(str(column_type)))
+        s = shortenName(PREFIX + str(column_name))
+        addNewColumn(cur, TABLE, s, dtypeToPSQLType(str(column_type)))
+        columns_list.append(s)
 
-    for row in df.itertuples():
-        for col, ind in zip(df.columns.values.tolist(), itertools.count()):
-            print col, row[ind]
+    cur.execute(u"ALTER TABLE IF EXISTS tweets ADD PRIMARY KEY (c_id)")
+
+    df.columns = columns_list
 
     cur.close()
     conn.commit()
@@ -93,3 +103,12 @@ except (Exception, psycopg2.DatabaseError) as error:
 finally:
     if conn is not None:
         conn.close()
+
+try:
+    print "Writting to Database..."
+    engine = create_engine('postgresql+psycopg2://' + DB_USER + ':' + DB_PASSWORD + '@localhost:5432/' + DB_NAME)
+    with engine.connect() as e_conn, e_conn.begin():
+        data = df.to_sql('tweets', e_conn, index=False, if_exists='append')
+    print "Wrote to Database."
+except (Exception, psycopg2.IntegrityError) as error:
+    print(error)
