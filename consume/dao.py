@@ -1,11 +1,14 @@
 """Module for handling database access and running queries.
+NOTE: Check VACUUM https://www.postgresql.org/docs/9.1/static/sql-vacuum.html
 """
 import json
 import re
+import os
 import pandas as pd
 import psycopg2
 
 from sqlalchemy import create_engine
+from sqlalchemy.exc import DBAPIError
 
 PREFIX = 'c_'
 
@@ -28,8 +31,12 @@ class PostgresDAO(object):
                              + db_config['name'])
         self.engine = create_engine(self._conn_string)
 
-    def update_metadata(self, last_json, last_dir):
+    def update_metadata(self, jfile):
         """Docstring"""
+        _jfile = jfile[:-5].split(os.path.sep)
+        last_json = _jfile[-1]
+        last_dir = _jfile[-2]
+        # print "Updating metadata with {0} / {1}".format(last_dir, last_json)
         self.cur.execute(u"""UPDATE meta_data SET last_json = {0}, """
                          u"""last_dir = {1}""".format(last_json, last_dir))
         if not self.cur.rowcount:
@@ -152,7 +159,7 @@ class PostgresDAO(object):
                     print("Warning: untreated type:", type(row_data),
                           row_data)
 
-    def workaround_type(self, table_name, data_frame):
+    def type_workaround(self, table_name, data_frame):
         """
         TODO: Remove this (converts every column to varchar)
         """
@@ -190,7 +197,9 @@ class PostgresDAO(object):
         """
         Docstring
         """
+        print "Consuming file {0} ".format(json_path)
         tweet = None
+        jdata = ""
         with open(json_path, 'r') as jfile:
             jdata = jfile.read()
             tweet = json.loads(jdata)
@@ -204,22 +213,22 @@ class PostgresDAO(object):
 
         if not self.table_exists(self.table):
             self.create_table_from_df(data_frame, self.table, PREFIX + 'id')
-            self.workaround_type(self.table, data_frame)
+            self.type_workaround(self.table, data_frame)
         else:
             for (col_name, col_type) in PostgresDAO.get_df_columns(data_frame):
                 converted_col_type = PostgresDAO.dtype_to_psql(str(col_type))
                 self.add_new_column(self.table, col_name, converted_col_type)
 
-            self.workaround_type(self.table, data_frame)
+            self.type_workaround(self.table, data_frame)
 
         try:
             with self.engine.connect() as e_conn, e_conn.begin():
                 data_frame.to_sql(self.table, e_conn, index=False,
                                   if_exists='append')
-        except psycopg2.IntegrityError as error:
-            tweet_ts_ms = PostgresDAO.get_tweet_timestamp(tweet)
+        except (DBAPIError, psycopg2.IntegrityError) as error:
+            tweet_ts_ms = PostgresDAO.get_tweet_timestamp(jdata)
             error_msg = str(error).split('\n')[0]
-            print("Bad data: ts_ms:", tweet_ts_ms, "Error:", error_msg)
+            print "Bad data! ts_ms:", tweet_ts_ms, "Error:", error_msg
 
             if not self.table_exists(self.bad_table):
                 print "Creating table {0}...".format(self.bad_table)
@@ -231,11 +240,13 @@ class PostgresDAO(object):
                 self.conn.commit()
                 print "Table {0} created.\n".format(self.bad_table)
 
-            self.cur.execute(u"""INSERT INTO %s (ts_ms, raw_data, error_msg)"""
-                             u"""VALUES (%s, %s, %s)""", (self.bad_table,
-                                                          str(tweet_ts_ms),
-                                                          unicode(tweet),
-                                                          unicode(error_msg)))
+            self.cur.execute(u"""INSERT INTO {0}"""
+                             u"""(ts_ms, raw_data, error_msg)"""
+                             u"""VALUES (%s, %s, %s)""".format(self.bad_table),
+                             (
+                                 str(tweet_ts_ms),
+                                 unicode(jdata),
+                                 unicode(error_msg)))
 
     def dispose(self):
         """

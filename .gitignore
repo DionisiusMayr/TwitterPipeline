@@ -3,3 +3,7 @@
 *.swp
 
 secret_keys.py
+
+data/*
+notebooks/*
+config.py
